@@ -1,0 +1,8 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Upstream mock_lsst_image_generation binds short lambdas to names; keep the
+# same rule here so code shared with it is not flagged. sconsUtils runs ruff
+# on every build.
+ignore = ["E731"]

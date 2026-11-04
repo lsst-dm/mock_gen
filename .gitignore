@@ -1,0 +1,15 @@
+# Built by sconsUtils
+bin/
+python/lsst/mock/gen/version.py
+.sconsign.dblite
+.sconf_temp/
+config.log
+_eupspkg/
+tests/.tests/
+pytest_session.txt
+.coverage
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

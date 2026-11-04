@@ -1,0 +1,19 @@
+description: |
+  Generate mock LSST coadds and their truth tables, with no input datasets.
+
+  Each quantum builds one mock catalogue and renders it into a single-depth deepCoadd (six bands) plus the mock_truth
+  and mock_truth_peaks tables. The catalogue and depth come from the data ID, not this file: the tract id seeds the
+  catalogue, and the patch index is the depth in years (patch N is the N-year coadd). Choose which coadds to build
+  with a data query over a repository made by make_mock_butler_repo.py, e.g.
+
+      pipetask run -b REPO -i skymaps -o mock/gen -p pipelines/mock_coadd_gen.yaml \
+          -d "skymap='mock' AND patch IN (1, 5, 10)"
+
+  which, over 5 registered tracts, makes the 5 x 3 grid of this study. The repository registers only the six ugrizy
+  bands, so no band is named in the data query.
+tasks:
+  mockCoaddGen:
+    class: lsst.mock.gen.generate.MockCoaddGenTask
+    config:
+      canvas_npix: 3000
+      psf_model: moffat
