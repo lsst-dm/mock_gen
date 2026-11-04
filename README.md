@@ -34,48 +34,60 @@ runs the tests.
 
 ## Butler repository and the generator pipeline
 
-Mock coadds and their truth tables are made directly in a butler repository by a
-PipelineTask with no input datasets, so they can be built and run with
-`pipetask` or bps/htcondor like any other pipeline. There are no intermediate
-`.npy` files: each quantum builds a catalogue, renders one coadd, and writes it.
+Mock catalogues and coadds are made directly in a butler repository by a
+two-task pipeline with no input datasets, so they can be built and run with
+`pipetask` or bps/htcondor like any other pipeline. `mockCatalogGen` builds one
+catalogue per tract; `mockCoaddGen` renders a tract's catalogue into a
+single-depth coadd and its truth tables, so one catalogue can be rendered at
+many depths and noise realisations without rebuilding it.
 
-First make an empty repository and its skymap. The skymap has one tract per
-catalogue and one patch per survey depth (patch N is the N-year coadd), with
-each patch sized to `--npix` (a DP2 patch is 3000 px):
+The catalogue, depth and noise realisation come from the data ID, not config:
+
+- `tract` is the catalogue seed, so each tract is an independent scene;
+- `patch` is `noise_digit * 10 + epoch_digit`, with `epoch_digit` 0 meaning the
+  10-year coadd (so patch 10 is noise 0 at 10 years, patch 11 noise 0 at 1 year,
+  patch 25 noise 2 at 5 years). Patches sharing an epoch but differing in the
+  noise digit are independent noise realisations of the same scene at the same
+  depth.
+
+First make an empty repository, registering the tract and patch data IDs to
+build. The tracts and patches carry no sky geometry (each coadd gets a fixed
+COSMOS TAN WCS); `--npix` is the frame size and must match the coadd task's
+`canvas_npix` (a DP2 patch is 3000 px):
 
 ```bash
-make_mock_butler_repo.py ~/mocks/repo --n-tracts 5 --max-epoch-year 10 --npix 3000
+make_mock_butler_repo.py ~/mocks/repo --tracts 8000 9000 9500 --patches 11 15 10 --npix 3000
 ```
 
-Then run the generator. The catalogue and depth come from the data ID, not
-config: the tract id seeds the catalogue and the patch index is the depth in
-years. Pick which coadds to build with a data query (no band is named: the repo
-registers only the six ugrizy bands):
+Then run the generator. Pick which (tract, patch) to build with a data query (no
+band is named: the repo registers only the six ugrizy bands):
 
 ```bash
-# the 5 x 3 grid of this study: catalogues (tracts) 0-4 at 1, 5 and 10 years
+# tracts 8000 and 9000, each at 1, 5 and 10 years
 pipetask run -b ~/mocks/repo -i skymaps -o mock/gen -p $MOCK_GEN_DIR/pipelines/mock_coadd_gen.yaml \
-    -d "skymap='mock' AND patch IN (1, 5, 10)"
+    -d "skymap='mock' AND tract IN (8000, 9000) AND patch IN (11, 15, 10)"
 ```
 
 | Dataset type | Data ID | Contents |
 |---|---|---|
-| `deepCoadd` | skymap, tract, patch, band | Coadd in nJy (`ExposureF`) with variance, mask, PSF and a TAN WCS; `x_pix`, `y_pix` in `mock_truth` are its pixel coordinates (origin at the patch corner) |
+| `mock_galaxies`, `mock_sfregions`, `mock_tidal_blobs`, `mock_tidal_pairs` | skymap, tract | The four catalogue tables (`ArrowAstropy`), reused across a tract's patches |
+| `deepCoadd` | skymap, tract, patch, band | Coadd in nJy (`ExposureF`) with variance, mask, PSF and a TAN WCS; `x_pix`, `y_pix` in `mock_truth` are its pixel coordinates (origin at the frame corner) |
 | `mock_truth`, `mock_truth_peaks` | skymap, tract, patch | The truth tables (one row per peak-like component, and the coadd's noise-free peaks); see `mock_lsst_image_generation.truth_peaks` (`ArrowAstropy`) |
 
-Each run also stores `mockCoaddGen_config`, the task config that produced the
-coadd, so the repository records how the data was generated. `deepCoadd` is the
-input of the pipelines' coadd detection tasks. Because every mock coadd has the
-same band data IDs but a different tract/patch, analyse one coadd at a time by
-its tract and patch rather than chaining the runs.
+Each run also stores `mockCatalogGen_config` and `mockCoaddGen_config`, the task
+configs that produced the data, so the repository records how it was generated.
+`deepCoadd` is the input of the pipelines' coadd detection tasks. Because every
+mock coadd has the same band data IDs but a different tract/patch, analyse one
+coadd at a time by its tract and patch rather than chaining the runs.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `python/lsst/mock/gen/exposures.py` | Read a saved mock coadd and its truth tables into afw exposures and astropy tables |
-| `python/lsst/mock/gen/butler.py` | Make a butler repository, its skymap, bands and dataset types, and ingest coadds |
-| `python/lsst/mock/gen/generate.py` | `MockCoaddGenTask`: build a catalogue and render one coadd per quantum |
-| `bin.src/make_mock_butler_repo.py` | Command: make an empty repository and skymap for the generator |
-| `pipelines/mock_coadd_gen.yaml` | The generator pipeline |
+| `python/lsst/mock/gen/config.py` | Nested `pexConfig` classes: the scene, depth, PSF and noise knobs worth varying |
+| `python/lsst/mock/gen/generate.py` | `MockCatalogGenTask` and `MockCoaddGenTask` |
+| `python/lsst/mock/gen/exposures.py` | Turn rendered arrays into an afw exposure, and a truth table into astropy |
+| `python/lsst/mock/gen/butler.py` | Make a butler repository: register the data IDs, bands and dataset types |
+| `bin.src/make_mock_butler_repo.py` | Command: make an empty repository for the generator |
+| `pipelines/mock_coadd_gen.yaml` | The generator pipeline (both tasks) |
 | `tests/` | pytest suite (skipped without the stack) |

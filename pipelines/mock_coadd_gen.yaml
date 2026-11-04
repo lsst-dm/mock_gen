@@ -1,19 +1,26 @@
 description: |
-  Generate mock LSST coadds and their truth tables, with no input datasets.
+  Generate mock LSST catalogues and render them into coadds, with no input datasets.
 
-  Each quantum builds one mock catalogue and renders it into a single-depth deepCoadd (six bands) plus the mock_truth
-  and mock_truth_peaks tables. The catalogue and depth come from the data ID, not this file: the tract id seeds the
-  catalogue, and the patch index is the depth in years (patch N is the N-year coadd). Choose which coadds to build
-  with a data query over a repository made by make_mock_butler_repo.py, e.g.
+  Two tasks: mockCatalogGen builds one catalogue per tract (data ID skymap, tract), and mockCoaddGen renders a
+  tract's catalogue into a single-depth deepCoadd (six bands) plus the mock_truth and mock_truth_peaks tables (data
+  ID skymap, tract, patch). The catalogue, depth and noise come from the data ID, not this file: the tract id seeds
+  the catalogue, and the patch id is noise_digit * 10 + epoch_digit (epoch digit 0 is the 10-year coadd). So one
+  catalogue is rendered at many depths and noise realisations without rebuilding it.
 
-      pipetask run -b REPO -i skymaps -o mock/gen -p pipelines/mock_coadd_gen.yaml \
-          -d "skymap='mock' AND patch IN (1, 5, 10)"
+  Choose which to build with a data query over a repository made by make_mock_butler_repo.py, e.g.
 
-  which, over 5 registered tracts, makes the 5 x 3 grid of this study. The repository registers only the six ugrizy
-  bands, so no band is named in the data query.
+      pipetask run -b REPO -i skymaps -o mock/gen -p $MOCK_GEN_DIR/pipelines/mock_coadd_gen.yaml \
+          -d "skymap='mock' AND tract IN (8000, 9000) AND patch IN (11, 15, 10)"
+
+  which builds catalogues for tracts 8000 and 9000 and renders each at 1, 5 and 10 years. The repository registers
+  only the six ugrizy bands, so no band is named in the data query.
 tasks:
+  mockCatalogGen:
+    class: lsst.mock.gen.generate.MockCatalogGenTask
+    config:
+      catalogue.npix: 3000
   mockCoaddGen:
     class: lsst.mock.gen.generate.MockCoaddGenTask
     config:
-      canvas_npix: 3000
-      psf_model: moffat
+      image.canvas_npix: 3000
+      image.psf_model: moffat

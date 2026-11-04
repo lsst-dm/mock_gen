@@ -1,30 +1,36 @@
-"""A PipelineTask that generates mock coadds and their truth tables with no input datasets.
+"""PipelineTasks that generate mock catalogues and render them into coadds, with no input datasets.
 
-Each quantum builds one mock catalogue, renders it into a single coadd at one survey depth, and writes the six-band
-``deepCoadd`` plus the ``mock_truth`` and ``mock_truth_peaks`` tables. The catalogue and depth are taken from the
-quantum's data ID, not from config:
+The pipeline has two tasks. `MockCatalogGenTask` builds one mock catalogue per tract and writes its four tables.
+`MockCoaddGenTask` reads a tract's catalogue and renders it into a single-depth ``deepCoadd`` (six bands) plus the
+``mock_truth`` and ``mock_truth_peaks`` tables, so one catalogue can be rendered at many depths and noise
+realisations without rebuilding it.
 
-- the tract id is the catalogue's seed (and the index that seeds the stars and the coadd noise), so each tract is an
-  independent realisation;
-- the patch index is the depth in whole years, so patch 1 is the 1-year coadd, patch 5 the 5-year, patch 10 the
-  10-year; patch 0 and patches past 10 are rejected.
+The catalogue, depth and noise realisation come from the data ID, not config:
 
-Which (tract, patch) coadds are built is chosen by the registered skymap and the data query, e.g. five tracts with a
-data query of ``patch IN (1, 5, 10)`` makes the 5 x 3 grid of this study. The repository and its skymap are made by
-``make_mock_butler_repo.py`` (see `~mock_lsst_image_generation.lsst.butler.make_repo`).
+- the tract id is the catalogue seed, so each tract is an independent scene;
+- the patch id is ``noise_digit * 10 + epoch_digit``, with ``epoch_digit`` 0 meaning the 10-year coadd (so patch 10
+  is noise 0 at 10 years, patch 11 noise 0 at 1 year, patch 23 noise 2 at 3 years). Patches sharing an epoch but
+  differing in the noise digit are independent noise realisations of the same scene at the same depth.
+
+Which (tract, patch) data IDs exist is set when the repository is made (`~lsst.mock.gen.butler.make_repo`); a data
+query picks which to build, e.g. ``tract IN (8000, 9000) AND patch IN (11, 15, 10)``.
 """
 
-__all__ = ["MockCoaddGenConnections", "MockCoaddGenConfig", "MockCoaddGenTask"]
+__all__ = [
+    "MockCatalogGenConnections", "MockCatalogGenConfig", "MockCatalogGenTask",
+    "MockCoaddGenConnections", "MockCoaddGenConfig", "MockCoaddGenTask",
+]
 
 import contextlib
 import io
 
+import lsst.afw.geom as afwGeom
+import lsst.geom as geom
 import lsst.pex.config as pexConfig
 import lsst.pipe.base as pipeBase
 import lsst.pipe.base.connectionTypes as cT
-from lsst.skymap import BaseSkyMap
 
-from mock_lsst_image_generation.catalogue_pipeline import build_mock_catalogue
+from mock_lsst_image_generation.catalogue_pipeline import MockCatalogue, build_mock_catalogue
 from mock_lsst_image_generation.coadd_synthesis import MASK_PLANES
 from mock_lsst_image_generation.config import IMAGE_CONFIG
 from mock_lsst_image_generation.cosmos_catalogue import DEFAULT_COSMOS_PATH, load_cosmos2025_catalogue
@@ -32,84 +38,132 @@ from mock_lsst_image_generation.image_pipeline import render_single_coadd
 from mock_lsst_image_generation.truth_peaks import find_truth_peaks, truth_table
 
 from .butler import PEAKS_DATASET_TYPE, TRUTH_DATASET_TYPE
-from .exposures import MockCoadd, make_exposure, to_astropy
+from .config import CatalogueConfig, ImageConfig
+from .exposures import make_exposure, to_astropy
 
-# Patch index 0 is unused (a 0-year coadd has no visits) and the model is calibrated to the 10-year survey.
+# The model is calibrated to the 10-year survey, and patch 0 would be a 0-year (no-visit) coadd, so the epoch digit
+# 0 is mapped to the 10-year depth rather than rejected.
 MAX_EPOCH_YEAR = 10
+
+# The mock frames are built from COSMOS2025, so every tract shares a TAN WCS centred on the COSMOS field. The WCS is
+# irrelevant to detection testing; it only gives the exposures a sane sky frame.
+_COSMOS_RA = 150.1191
+_COSMOS_DEC = 2.2058
+
+_CATALOGUE_TABLES = ("galaxies", "sfregions", "tidal_blobs", "tidal_pairs")
+
+
+def _cosmos_wcs(npix, pixscale):
+    """TAN `~lsst.afw.geom.SkyWcs` centred on COSMOS, with the reference pixel at the frame centre."""
+    crpix = geom.Point2D((npix - 1) / 2, (npix - 1) / 2)
+    crval = geom.SpherePoint(_COSMOS_RA, _COSMOS_DEC, geom.degrees)
+    return afwGeom.makeSkyWcs(crpix, crval, afwGeom.makeCdMatrix(scale=pixscale * geom.arcseconds))
+
+
+class MockCatalogGenConnections(pipeBase.PipelineTaskConnections, dimensions=("skymap", "tract")):
+    """Connections for `MockCatalogGenTask`: the four catalogue tables, no inputs."""
+
+    galaxies = cT.Output(doc="One row per galaxy, star and LSB source.", name="mock_galaxies",
+                         storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+    sfregions = cT.Output(doc="Star-forming regions on resolved galaxies.", name="mock_sfregions",
+                          storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+    tidal_blobs = cT.Output(doc="Tidal-bridge light blobs between interacting pairs.", name="mock_tidal_blobs",
+                            storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+    tidal_pairs = cT.Output(doc="Interacting galaxy pairs linked by a tidal bridge.", name="mock_tidal_pairs",
+                            storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+
+
+class MockCatalogGenConfig(pipeBase.PipelineTaskConfig, pipelineConnections=MockCatalogGenConnections):
+    """Config for `MockCatalogGenTask`. The catalogue seed is the tract id, not here."""
+
+    catalogue = pexConfig.ConfigField(dtype=CatalogueConfig, doc="Scene-content settings.")
+    cosmos_path = pexConfig.Field(
+        dtype=str, default=None, optional=True,
+        doc="COSMOS2025 .npz to build catalogues from; the shipped subset is used when unset.")
+
+
+class MockCatalogGenTask(pipeBase.PipelineTask):
+    """Build one mock catalogue per tract and write its four tables."""
+
+    _DefaultName = "mockCatalogGen"
+    ConfigClass = MockCatalogGenConfig
+
+    def runQuantum(self, butlerQC, inputRefs, outputRefs):
+        seed = butlerQC.quantum.dataId["tract"]
+        outputs = self.run(seed=seed)
+        for table in _CATALOGUE_TABLES:
+            butlerQC.put(getattr(outputs, table), getattr(outputRefs, table))
+
+    def run(self, seed):
+        """Build a mock catalogue from the configured settings and the given seed.
+
+        Parameters
+        ----------
+        seed : `int`
+            Seed fixing the realisation (the tract id).
+
+        Returns
+        -------
+        result : `lsst.pipe.base.Struct`
+            ``galaxies``, ``sfregions``, ``tidal_blobs`` and ``tidal_pairs`` as
+            `astropy.table.Table`.
+        """
+        self.log.info("Building mock catalogue (seed %d)", seed)
+        cfg = {**self.config.catalogue.build_cfg(), "seed": seed}
+        star_cfg = self.config.catalogue.build_star_cfg()
+        cosmos = load_cosmos2025_catalogue(self.config.cosmos_path or DEFAULT_COSMOS_PATH)
+        # The pipeline captures the generator's output; the model's own progress bars and prints are noise here.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            catalogue = build_mock_catalogue(cosmos, cfg, star_cfg=star_cfg)
+        return pipeBase.Struct(**{table: to_astropy(getattr(catalogue, table)) for table in _CATALOGUE_TABLES})
 
 
 class MockCoaddGenConnections(pipeBase.PipelineTaskConnections, dimensions=("skymap", "tract", "patch"),
                               defaultTemplates={"coaddName": "deep"}):
-    """Connections for `MockCoaddGenTask`: a skymap, and the coadd and truth-table outputs."""
+    """Connections for `MockCoaddGenTask`: a tract's catalogue in, its coadd and truth tables out."""
 
-    skyMap = cT.Input(
-        doc="Skymap whose tract and patch give the coadd's WCS and position.",
-        name=BaseSkyMap.SKYMAP_DATASET_TYPE_NAME,
-        storageClass="SkyMap",
-        dimensions=("skymap",),
-    )
+    galaxies = cT.Input(doc="The tract's galaxy table.", name="mock_galaxies",
+                        storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+    sfregions = cT.Input(doc="The tract's star-forming regions.", name="mock_sfregions",
+                         storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+    tidal_blobs = cT.Input(doc="The tract's tidal-bridge blobs.", name="mock_tidal_blobs",
+                           storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
+    tidal_pairs = cT.Input(doc="The tract's interacting pairs.", name="mock_tidal_pairs",
+                           storageClass="ArrowAstropy", dimensions=("skymap", "tract"))
     coadds = cT.Output(
         doc="Mock coadd of each band (nJy, with variance, mask, PSF and WCS).",
-        name="{coaddName}Coadd",
-        storageClass="ExposureF",
-        dimensions=("band", "skymap", "tract", "patch"),
-        multiple=True,
-    )
+        name="{coaddName}Coadd", storageClass="ExposureF",
+        dimensions=("band", "skymap", "tract", "patch"), multiple=True)
     truth = cT.Output(
         doc="One row per peak-like component of the mock, with per-band flux and peak flags.",
-        name=TRUTH_DATASET_TYPE,
-        storageClass="ArrowAstropy",
-        dimensions=("skymap", "tract", "patch"),
-    )
+        name=TRUTH_DATASET_TYPE, storageClass="ArrowAstropy", dimensions=("skymap", "tract", "patch"))
     peaks = cT.Output(
         doc="Every noise-free local maximum of the coadd, with the component it belongs to.",
-        name=PEAKS_DATASET_TYPE,
-        storageClass="ArrowAstropy",
-        dimensions=("skymap", "tract", "patch"),
-    )
+        name=PEAKS_DATASET_TYPE, storageClass="ArrowAstropy", dimensions=("skymap", "tract", "patch"))
 
 
 class MockCoaddGenConfig(pipeBase.PipelineTaskConfig, pipelineConnections=MockCoaddGenConnections):
-    """Config for `MockCoaddGenTask`. Catalogue and depth are set by the data ID, not here."""
+    """Config for `MockCoaddGenTask`. The epoch and noise realisation come from the patch id."""
 
-    canvas_npix = pexConfig.Field(
-        dtype=int, default=3000,
-        doc="Side of each coadd in pixels; must fit the skymap patch (a DP2 patch is 3000).")
-    psf_model = pexConfig.ChoiceField(
-        dtype=str, default="moffat",
-        allowed={"gaussian": "Gaussian core, halo and spikes on stars only",
-                 "moffat": "Moffat core with halo and spikes shared by every source"},
-        doc="PSF model shared by the coadd's bands.")
-    n_workers = pexConfig.Field(
-        dtype=int, default=4, doc="Parallel GalSim rendering processes.")
+    image = pexConfig.ConfigField(dtype=ImageConfig, doc="Depth, PSF and noise settings.")
+    n_workers = pexConfig.Field(dtype=int, default=4, doc="Parallel GalSim rendering processes.")
     min_snr = pexConfig.Field(
         dtype=float, default=1.0, doc="Keep noise-free local maxima with at least this per-pixel S/N.")
     match_radius = pexConfig.Field(
         dtype=float, default=3.0, doc="Pixels within which a maximum belongs to a component.")
-    cosmos_path = pexConfig.Field(
-        dtype=str, default=None, optional=True,
-        doc="COSMOS2025 .npz to build catalogues from; the shipped subset is used when unset.")
-    config_overrides = pexConfig.DictField(
-        keytype=str, itemtype=float, default={},
-        doc="Numeric overrides folded into the catalogue CONFIG (e.g. bcg_per_deg2); for structured keys use a "
-            "python block in the pipeline file.")
-    image_config_overrides = pexConfig.DictField(
-        keytype=str, itemtype=float, default={},
-        doc="Numeric overrides folded into IMAGE_CONFIG.")
 
 
 class MockCoaddGenTask(pipeBase.PipelineTask):
-    """Generate one mock coadd and its truth tables per (tract, patch) quantum."""
+    """Render one tract's catalogue into a coadd and truth tables per (tract, patch) quantum."""
 
     _DefaultName = "mockCoaddGen"
     ConfigClass = MockCoaddGenConfig
 
     def runQuantum(self, butlerQC, inputRefs, outputRefs):
-        skyMap = butlerQC.get(inputRefs.skyMap)
-        dataId = butlerQC.quantum.dataId
-        tract = skyMap[dataId["tract"]]
-        patch = tract[dataId["patch"]]
-        outputs = self.run(tract=tract, patch=patch, seed=dataId["tract"], patch_index=dataId["patch"],
+        inputs = butlerQC.get(inputRefs)
+        catalogue = MockCatalogue(*(inputs[table].to_pandas() for table in _CATALOGUE_TABLES))
+        patch = butlerQC.quantum.dataId["patch"]
+        outputs = self.run(catalogue=catalogue, seed=butlerQC.quantum.dataId["tract"], patch=patch,
                            bands=[ref.dataId["band"] for ref in outputRefs.coadds])
         refByBand = {ref.dataId["band"]: ref for ref in outputRefs.coadds}
         for band, exposure in outputs.coadds.items():
@@ -117,60 +171,56 @@ class MockCoaddGenTask(pipeBase.PipelineTask):
         butlerQC.put(outputs.truth, outputRefs.truth)
         butlerQC.put(outputs.peaks, outputRefs.peaks)
 
-    def run(self, tract, patch, seed, patch_index, bands):
-        """Build a mock catalogue, render it at the patch's depth, and return the per-band coadds and truth tables.
+    def run(self, catalogue, seed, patch, bands):
+        """Render a catalogue into the patch's coadd and build its truth tables.
 
         Parameters
         ----------
-        tract : `lsst.skymap.TractInfo`
-            Tract the coadd belongs to; its WCS is attached to the exposures.
-        patch : `lsst.skymap.PatchInfo`
-            Patch the coadd fills; its inner bounding box fixes the coadd's position.
+        catalogue : `mock_lsst_image_generation.catalogue_pipeline.MockCatalogue`
+            Catalogue to render (the four tables; the diagnostic fields are None).
         seed : `int`
-            Seed and star/noise index of the catalogue realisation (the tract id).
-        patch_index : `int`
-            Depth in whole years (the patch id); must be 1 to 10.
+            The tract id; with the patch's noise digit it indexes the render.
+        patch : `int`
+            Patch id, ``noise_digit * 10 + epoch_digit`` (epoch digit 0 is 10 years).
         bands : `list` [`str`]
             Bands to render, in output order.
 
         Returns
         -------
         result : `lsst.pipe.base.Struct`
-            ``coadds`` (`dict` [`str`, `lsst.afw.image.ExposureF`]), ``truth`` and ``peaks``
-            (`astropy.table.Table`).
+            ``coadds`` (`dict` [`str`, `lsst.afw.image.ExposureF`]), ``truth`` and
+            ``peaks`` (`astropy.table.Table`).
         """
-        if not 1 <= patch_index <= MAX_EPOCH_YEAR:
-            raise ValueError(f"patch {patch_index} does not name a depth: use patch 1 to {MAX_EPOCH_YEAR} "
-                             f"(patch N is the N-year coadd)")
-        epoch = f"{patch_index}y"
-        corner = patch.getInnerBBox().getMin()
-        cfg = {**IMAGE_CONFIG, **{k: v for k, v in self.config.image_config_overrides.items()},
-               "psf_model": self.config.psf_model, "canvas_npix": self.config.canvas_npix, "bands": list(bands)}
-        cat_cfg = {**{k: v for k, v in self.config.config_overrides.items()},
-                   "seed": seed, "npix": self.config.canvas_npix, "out_bands": list(bands)}
+        noise_digit, epoch_digit = divmod(patch, 10)
+        epoch_year = MAX_EPOCH_YEAR if epoch_digit == 0 else epoch_digit
+        if not 0 <= noise_digit <= 9:
+            raise ValueError(f"patch {patch} out of range: noise digit {noise_digit} must be 0 to 9")
+        epoch = f"{epoch_year}y"
+        # Vary the render index by the noise digit so same-depth patches are independent noise realisations; the
+        # catalogue was built from the tract seed alone, so it is shared across a tract's patches.
+        render_index = seed * 10 + noise_digit
+        # Merge over IMAGE_CONFIG so render_single_coadd and find_truth_peaks see every key, not just the exposed ones.
+        cfg = {**IMAGE_CONFIG, **self.config.image.build_cfg(bands)}
 
-        self.log.info("Building mock catalogue (seed %d) and the %s coadd for tract %d, patch %d",
-                      seed, epoch, tract.getId(), patch_index)
-        cosmos = load_cosmos2025_catalogue(self.config.cosmos_path or DEFAULT_COSMOS_PATH)
-        # The pipeline captures the generator's output; the model's own progress bars and prints are noise here.
+        self.log.info("Rendering the %s coadd (tract %d, patch %d, noise %d)", epoch, seed, patch, noise_digit)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            catalogue = build_mock_catalogue(cosmos, cat_cfg)
             key, coadd, out_bands, origin, base_image, signal, variance, mask, psf = render_single_coadd(
-                catalogue, seed, cfg=cfg, n_workers=self.config.n_workers, epoch=epoch)
+                catalogue, render_index, cfg=cfg, n_workers=self.config.n_workers, epoch=epoch)
 
-        mock = MockCoadd(name=str(tract.getId()), key=key, directory=None, bands=out_bands,
-                         origin=(corner.getX(), corner.getY()), pixel_scale=cfg["pixscale"], signal=signal,
-                         variance=variance, mask=mask, psf=psf,
-                         mask_planes={plane: 1 << bit for plane, bit in MASK_PLANES.items()}, settings=coadd)
-        coadds = {band: make_exposure(mock, band, tract.getWcs()) for band in out_bands}
+        npix = self.config.image.canvas_npix
+        bbox = geom.Box2I(geom.Point2I(0, 0), geom.Extent2I(npix, npix))
+        wcs = _cosmos_wcs(npix, cfg["pixscale"])
+        mask_planes = {plane: 1 << bit for plane, bit in MASK_PLANES.items()}
+        coadds = {}
+        for index, band in enumerate(out_bands):
+            metadata = {"MOCK_COADD": key, "MOCK_PSF_MODEL": coadd.get("psf_model", "gaussian"),
+                        "MOCK_N_VISIT": int(coadd["n_visit"][band]), "MOCK_FWHM": float(coadd["fwhm_arcsec"][band])}
+            if coadd.get("moffat_beta"):
+                metadata["MOCK_MOFFAT_BETA"] = float(coadd["moffat_beta"][band])
+            coadds[band] = make_exposure(signal[index], variance[index], mask[index], psf[index], band,
+                                         mask_planes, bbox, wcs=wcs, metadata=metadata)
 
         truth = truth_table(catalogue, out_bands, cfg["pixscale"])
         flagged, found = find_truth_peaks(truth, base_image, origin, coadd, cfg, self.config.min_snr,
                                           self.config.match_radius)
-        # Shift the pixel positions into the exposure's frame (origin at the patch corner), so truth x_pix / y_pix
-        # line up with the coadd pixels and with detected peak positions; x_array / y_array stay 0-based into the
-        # image array.
-        for table in (flagged, found):
-            table["x_pix"] += corner.getX()
-            table["y_pix"] += corner.getY()
         return pipeBase.Struct(coadds=coadds, truth=to_astropy(flagged), peaks=to_astropy(found))
