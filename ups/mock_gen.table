@@ -1,0 +1,17 @@
+# This package wraps mock_lsst_image_generation, which is not an EUPS product.
+# Put its repository root on PYTHONPATH (see the README); EUPS does not manage
+# it. numpy, scipy, pandas and galsim come from the rubin-env conda environment.
+setupRequired(sconsUtils)
+setupRequired(afw)
+setupRequired(geom)
+setupRequired(daf_butler)
+setupRequired(meas_algorithms)
+setupRequired(obs_lsst)
+setupRequired(pex_config)
+setupRequired(pipe_base)
+setupRequired(skymap)
+setupRequired(utils)
+setupRequired(ctrl_mpexec)
+
+envPrepend(PYTHONPATH, ${PRODUCT_DIR}/python)
+envPrepend(PATH, ${PRODUCT_DIR}/bin)
