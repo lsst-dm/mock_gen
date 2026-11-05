@@ -95,6 +95,15 @@ class MockGenTestCase(lsst.utils.tests.TestCase):
         # 2 tracts x 1 catalogue + 2 tracts x 2 patches of coadds.
         self.assertEqual(self.n_quanta, 2 + 4)
 
+    def testSkyMap(self):
+        # make_repo stores a MockSkyMap whose tracts are the (arbitrary) seed ids, so coadd tasks that need a
+        # skymap (e.g. the legacy MergeDetectionsTask) can look up a tract by id.
+        skyMap = self.butler.get("skyMap", skymap=SKYMAP, collections="skymaps")
+        self.assertEqual(skyMap[TRACT].getId(), TRACT)
+        bbox = skyMap[TRACT].getPatchInfo(0).getOuterBBox()
+        self.assertEqual(bbox.getMin(), geom.Point2I(0, 0))
+        self.assertEqual(bbox.getDimensions(), geom.Extent2I(NPIX, NPIX))
+
     def testCatalogueDatasets(self):
         for name in CATALOGUE_DATASET_TYPES:
             refs = list(self.butler.registry.queryDatasets(name, collections=OUTPUT))

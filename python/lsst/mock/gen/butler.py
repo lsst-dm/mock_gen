@@ -9,12 +9,13 @@ __all__ = [
     "register_lsstcam_bands",
 ]
 
-import hashlib
 from pathlib import Path
 
 from lsst.daf.butler import Butler, DatasetType
 from lsst.obs.lsst import LsstCam
 from lsst.utils.introspection import get_full_type_name
+
+from .skymap import MockSkyMap, MockSkyMapConfig
 
 # The coadd name read by the coadd detection tasks (DetectCoaddSourcesTask, MultiResolutionDetectionTask).
 COADD_DATASET_TYPE = "deepCoadd"
@@ -57,13 +58,14 @@ def register_lsstcam_bands(butler: Butler) -> None:
 def make_repo(root: str | Path, tracts, patches, skymap_name: str = "mock", npix: int = 3000) -> Butler:
     """Create and seed a butler repository for the mock generator.
 
-    The repository is ready to build a no-input quantum graph: the requested
-    ``(skymap, tract, patch)`` dimension records, the LSSTCam ugrizy bands and
-    the generator's dataset types are registered. No datasets are ingested; the
-    pipeline writes them. The tracts and patches carry no sky geometry (the
-    tasks give each coadd a fixed COSMOS WCS): a tract is a catalogue seed and a
-    patch encodes a noise realisation and a survey epoch (see
-    `~lsst.mock.gen.generate`).
+    The repository is ready to build a no-input quantum graph: a `MockSkyMap`
+    (the requested tracts over one COSMOS frame), the LSSTCam ugrizy bands and
+    the generator's dataset types are registered. No datasets are ingested
+    except the skymap; the pipeline writes the rest. The tracts and patches
+    carry no real sky geometry (a tract is a catalogue seed and a patch encodes
+    a noise realisation and a survey epoch; see `~lsst.mock.gen.generate`), but
+    the skymap gives coadd tasks that need one (e.g. the legacy
+    `MergeDetectionsTask`) a tract to look up.
 
     Parameters
     ----------
@@ -72,12 +74,13 @@ def make_repo(root: str | Path, tracts, patches, skymap_name: str = "mock", npix
     tracts : iterable [`int`]
         Tract ids to register; each is a catalogue seed.
     patches : iterable [`int`]
-        Patch ids to register for every tract; ``noise_digit * 10 + epoch``.
+        Patch ids to build for; the skymap patch grid is sized to hold the
+        largest. A patch id is ``noise_digit * 10 + epoch``.
     skymap_name : `str`, optional
-        Name of the skymap dimension record the data IDs live under.
+        Name of the skymap to register.
     npix : `int`, optional
-        Side of each mock frame in pixels; recorded in ``patch_nx_max`` so the
-        cell indices are consistent, and matched by the task's ``canvas_npix``.
+        Side of each mock frame (one patch) in pixels; matched by the coadd
+        task's ``canvas_npix``.
 
     Returns
     -------
@@ -90,23 +93,13 @@ def make_repo(root: str | Path, tracts, patches, skymap_name: str = "mock", npix
     butler = Butler.from_config(str(root), writeable=True)
     register_lsstcam_bands(butler)
 
-    # A skymap dimension record with no SkyMap dataset or geometry: the tasks do not query a skymap, and detection
-    # does not need a sky WCS. nx is wide enough that every patch id has a distinct (cell_x, cell_y).
-    nx = max(patches) + 1
-    hash_bytes = hashlib.sha1(f"mock:{skymap_name}".encode()).digest()
-    # A no-input quantum graph still needs a non-empty input collection; this empty RUN plays the role the skymap
-    # collection does in a normal pipeline.
-    butler.registry.registerRun("skymaps")
-    with butler.registry.transaction():
-        butler.registry.insertDimensionData("skymap", {
-            "skymap": skymap_name, "hash": hash_bytes,
-            "tract_max": max(tracts) + 1, "patch_nx_max": nx, "patch_ny_max": 1,
-        })
-        for tract in tracts:
-            butler.registry.insertDimensionData("tract", {"skymap": skymap_name, "tract": tract})
-            for patch in patches:
-                butler.registry.insertDimensionData("patch", {
-                    "skymap": skymap_name, "tract": tract, "patch": patch, "cell_x": patch % nx, "cell_y": 0})
+    # The skymap registers its own dimension records (skymap, tract, patch) and writes the SkyMap dataset into the
+    # skymaps RUN, which is also the non-empty input collection a no-input quantum graph needs.
+    config = MockSkyMapConfig()
+    config.tractIds = tracts
+    config.npix = npix
+    config.nPatches = max(patches) + 1
+    MockSkyMap(config).register(skymap_name, butler)
 
     universe = butler.dimensions
     patch_dims = ["skymap", "tract", "patch"]
