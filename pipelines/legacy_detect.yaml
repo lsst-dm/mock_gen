@@ -1,0 +1,30 @@
+description: >
+  Legacy per-band coadd detection and merge on mock coadds (DM-52721), for
+  comparison with the multi-band detection in detect.yaml. DetectCoaddSourcesTask
+  detects each band, then MergeDetectionsTask merges them. The merge needs a
+  skyMap dataset, so run with -i <gen run>,skymaps (make_repo stores a MockSkyMap
+  in the skymaps collection).
+
+parameters:
+  release_id: 0
+
+tasks:
+  detectCoaddPeaks:
+    class: lsst.pipe.tasks.multiBand.DetectCoaddSourcesTask
+    config:
+      connections.exposure: deepCoadd
+      # The mock coadds are already background-subtracted, so do not re-estimate a
+      # background; the task's local background term (doTempLocalBackground) is
+      # enough for detection.
+      detection.reEstimateBackground: false
+      idGenerator.release_id: parameters.release_id
+  mergeCoaddDetections:
+    class: lsst.pipe.tasks.mergeDetections.MergeDetectionsTask
+    config:
+      # Band priority for resolving a source detected in several bands, deepest
+      # and most reliable first; required, no default.
+      priorityList: ["i", "r", "z", "y", "g", "u"]
+      # A distinct name so the merged legacy catalogue does not collide with the
+      # new task's object_detection_merged when both live in one repo.
+      connections.outputCatalog: object_detection_merged_legacy
+      idGenerator.release_id: parameters.release_id

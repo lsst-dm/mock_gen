@@ -1,0 +1,18 @@
+description: >
+  Multi-band coadd detection on mock coadds (DM-52721). MultiBandDetectionTask
+  detects jointly across bands and writes one merged peak catalogue; compare with
+  legacy_detect.yaml. Run with -i <gen run> (the deepCoadd collection); no skymap
+  is needed.
+
+parameters:
+  release_id: 0
+
+tasks:
+  multiBandDetection:
+    class: lsst.pipe.tasks.multiBand.MultiBandDetectionTask
+    config:
+      useCellCoadds: false
+      connections.exposures: deepCoadd
+      connections.detectionSchema: object_detection_schema
+      connections.outputCatalog: object_detection_merged
+      idGenerator.release_id: parameters.release_id

@@ -80,6 +80,25 @@ configs that produced the data, so the repository records how it was generated.
 mock coadd has the same band data IDs but a different tract/patch, analyse one
 coadd at a time by its tract and patch rather than chaining the runs.
 
+## Detection pipelines
+
+Two detection pipelines run on the generated coadds, to compare the new
+multi-band detection with the legacy per-band detect-then-merge flow:
+
+```bash
+# new: joint multi-band detection, one merged catalogue (object_detection_merged)
+pipetask run -b REPO -i <gen run> -o mock/detect \
+    -p $MOCK_GEN_DIR/pipelines/detect.yaml -d "<query>"
+
+# legacy: per-band detection then merge (object_detection_merged_legacy). The
+# merge needs the skymap, so skymaps is in the input collections.
+pipetask run -b REPO -i <gen run>,skymaps -o mock/legacy_detect \
+    -p $MOCK_GEN_DIR/pipelines/legacy_detect.yaml -d "<query>"
+```
+
+`make_repo` stores a `MockSkyMap` in the `skymaps` collection for the legacy
+merge; `detect.yaml` needs only `deepCoadd`.
+
 ## Layout
 
 | Path | Contents |
@@ -88,6 +107,8 @@ coadd at a time by its tract and patch rather than chaining the runs.
 | `python/lsst/mock/gen/generate.py` | `MockCatalogGenTask` and `MockCoaddGenTask` |
 | `python/lsst/mock/gen/exposures.py` | Turn rendered arrays into an afw exposure, and a truth table into astropy |
 | `python/lsst/mock/gen/butler.py` | Make a butler repository: register the data IDs, bands and dataset types |
+| `python/lsst/mock/gen/skymap.py` | `MockSkyMap`: arbitrary tract ids over one COSMOS frame, for tasks that need a skymap |
 | `bin.src/make_mock_butler_repo.py` | Command: make an empty repository for the generator |
 | `pipelines/mock_coadd_gen.yaml` | The generator pipeline (both tasks) |
+| `pipelines/detect.yaml`, `pipelines/legacy_detect.yaml` | Detection pipelines (new multi-band; legacy per-band + merge) |
 | `tests/` | pytest suite (skipped without the stack) |
