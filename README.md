@@ -99,6 +99,18 @@ pipetask run -b REPO -i <gen run>,skymaps -o mock/legacy_detect \
 `make_repo` stores a `MockSkyMap` in the `skymaps` collection for the legacy
 merge; `detect.yaml` needs only `deepCoadd`.
 
+## Scoring detection against truth
+
+`lsst.mock.gen.validation` scores a detection method's peaks against a truth
+catalogue: completeness and purity as a function of truth peak S/N, per band
+and per epoch. It reads the mock truth (`MockTruthSource`) or real coadds with
+injected sources (`InjectedTruthSource`) through one interface, so the same
+metrics run on both; only the mocks can measure purity and separate a galaxy's
+own peak from its star-forming regions and tidal blobs. `evaluate` matches
+every method over every patch and returns two tidy tables that `completeness`,
+`purity` and `summarize_purity` reduce. See
+`notebooks/detection_validation.ipynb` for the new-vs-legacy comparison.
+
 ## Layout
 
 | Path | Contents |
@@ -108,6 +120,7 @@ merge; `detect.yaml` needs only `deepCoadd`.
 | `python/lsst/mock/gen/exposures.py` | Turn rendered arrays into an afw exposure, and a truth table into astropy |
 | `python/lsst/mock/gen/butler.py` | Make a butler repository: register the data IDs, bands and dataset types |
 | `python/lsst/mock/gen/skymap.py` | `MockSkyMap`: arbitrary tract ids over one COSMOS frame, for tasks that need a skymap |
+| `python/lsst/mock/gen/validation.py` | Score detection against truth: completeness and purity vs S/N, per band and epoch |
 | `bin.src/make_mock_butler_repo.py` | Command: make an empty repository for the generator |
 | `pipelines/mock_coadd_gen.yaml` | The generator pipeline (both tasks) |
 | `pipelines/detect.yaml`, `pipelines/legacy_detect.yaml` | Detection pipelines (new multi-band; legacy per-band + merge) |
