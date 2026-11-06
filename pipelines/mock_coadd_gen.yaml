@@ -19,6 +19,13 @@ tasks:
     class: lsst.mock.gen.generate.MockCatalogGenTask
     config:
       catalogue.npix: 3000
+      # The default scene (logm_min 7, no magnitude cut) renders galaxies to
+      # i ~ 34 at ~376/arcmin^2, about 23x the density of a DP2 injection field
+      # and far below the detection limit. Cut the unrenderable faint tail and
+      # raise the mass floor so the density and depth are comparable to the
+      # injected coadds the detection is also scored on.
+      catalogue.render_mag_r_max: 27.0
+      catalogue.logm_min: 9.5
   mockCoaddGen:
     class: lsst.mock.gen.generate.MockCoaddGenTask
     config:
