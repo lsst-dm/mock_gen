@@ -19,11 +19,35 @@ import lsst.geom as geom
 import lsst.pex.config as pexConfig
 from lsst.skymap import BaseSkyMap
 from lsst.skymap.cachingSkyMap import CachingSkyMap
+from lsst.skymap.patchInfo import PatchInfo
 from lsst.skymap.tractInfo import ExplicitTractInfo
 
 # The mock frames are built from COSMOS2025, so the tract sits on the COSMOS field.
 _COSMOS_RA = 150.1191
 _COSMOS_DEC = 2.2058
+
+
+class _MockTractInfo(ExplicitTractInfo):
+    """Tract whose every patch is the one frame at the image origin.
+
+    A patch id selects a noise realisation and epoch, not a position on the sky,
+    and the coadd for every patch is written at pixel origin ``(0, 0)``. The base
+    `~lsst.skymap.TractInfo` instead lays patches out on a grid, so patch id 1
+    gets a bbox at ``(npix, 0)`` and so on. A task that reads the patch bbox and
+    the patch image together (e.g. `MergeDetectionsTask`, which allocates a mask
+    over ``getOuterBBox()`` and inserts the detection footprints) then sees the
+    footprints, at the origin, fall outside the bbox for any patch but 0. Return
+    the frame bbox for every valid patch id so the two always agree.
+    """
+
+    def getPatchInfo(self, index):
+        # Validate the id and reuse the sequential index and WCS the base
+        # computes; only the bbox is moved to the frame origin. patchBorder is 0,
+        # so the base inner bbox already has the frame dimensions.
+        info = super().getPatchInfo(index)
+        bbox = geom.Box2I(geom.Point2I(0, 0), info.getInnerBBox().getDimensions())
+        return PatchInfo(index=info.getIndex(), innerBBox=bbox, outerBBox=bbox,
+                         sequentialIndex=info.getSequentialIndex(), tractWcs=info.getWcs())
 
 
 class MockSkyMapConfig(BaseSkyMap.ConfigClass):
@@ -72,8 +96,8 @@ class MockSkyMap(CachingSkyMap):
         # A radius covering the whole patch grid, so patches 0 .. nPatches-1 exist.
         radius = (self.config.nPatches * self.config.npix) * self.config.pixelScale / 3600 / 2 * geom.degrees
         wcs = self._wcsFactory.makeWcs(crPixPos=geom.Point2D(0, 0), crValCoord=center)
-        return ExplicitTractInfo(self.config.tractIds[index], self._tractBuilder, center,
-                                 radius, self.config.tractOverlap * geom.degrees, wcs)
+        return _MockTractInfo(self.config.tractIds[index], self._tractBuilder, center,
+                              radius, self.config.tractOverlap * geom.degrees, wcs)
 
     def __iter__(self):
         """Iterate tracts by sequential position (used by `register`)."""

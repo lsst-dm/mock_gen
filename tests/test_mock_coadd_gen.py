@@ -22,7 +22,9 @@ try:
     from lsst.ctrl.mpexec import SimplePipelineExecutor
     from lsst.daf.butler import Butler
     from lsst.meas.algorithms import DynamicDetectionTask, MultiResolutionDetectionTask
-    from lsst.pipe.base import Pipeline
+    from lsst.pipe.base import Pipeline, Struct
+    from lsst.pipe.tasks.mergeDetections import MergeDetectionsTask
+    from lsst.pipe.tasks.multiBand import DetectCoaddSourcesTask
 
     from lsst.mock.gen.butler import (CATALOGUE_DATASET_TYPES, COADD_DATASET_TYPE, PEAKS_DATASET_TYPE,
                                       TRUTH_DATASET_TYPE, make_repo)
@@ -100,9 +102,13 @@ class MockGenTestCase(lsst.utils.tests.TestCase):
         # skymap (e.g. the legacy MergeDetectionsTask) can look up a tract by id.
         skyMap = self.butler.get("skyMap", skymap=SKYMAP, collections="skymaps")
         self.assertEqual(skyMap[TRACT].getId(), TRACT)
-        bbox = skyMap[TRACT].getPatchInfo(0).getOuterBBox()
-        self.assertEqual(bbox.getMin(), geom.Point2I(0, 0))
-        self.assertEqual(bbox.getDimensions(), geom.Extent2I(NPIX, NPIX))
+        # Every patch id is the same frame at the image origin (not a cell on a grid); a task that reads the patch
+        # bbox and the patch image together needs them to agree, and the coadds are all written at (0, 0). PATCH is a
+        # non-zero id, so a grid layout would put it at (PATCH * NPIX, ...).
+        for patch in (0, PATCH, NOISE_PATCH):
+            bbox = skyMap[TRACT].getPatchInfo(patch).getOuterBBox()
+            self.assertEqual(bbox.getMin(), geom.Point2I(0, 0))
+            self.assertEqual(bbox.getDimensions(), geom.Extent2I(NPIX, NPIX))
 
     def testCatalogueDatasets(self):
         for name in CATALOGUE_DATASET_TYPES:
@@ -180,6 +186,31 @@ class MockGenTestCase(lsst.utils.tests.TestCase):
         result = task.run(afwTable.SourceTable.make(schema), exposure)
         peaks = self.butler.get(PEAKS_DATASET_TYPE, self.dataId)
         self.assertGreater(recovered_fraction(result.sources, peaks, "r"), MIN_RECOVERED)
+
+    def testLegacyMergeOffOriginPatch(self):
+        # MergeDetectionsTask allocates a mask over the patch outer bbox and inserts the per-band detection
+        # footprints, which sit at the image origin. The merge runs on a non-zero patch here (a grid patch layout
+        # would put its bbox off the origin and the insert would raise OutOfRangeError).
+        skyMap = self.butler.get("skyMap", skymap=SKYMAP, collections="skymaps")
+        detConfig = DetectCoaddSourcesTask.ConfigClass()
+        detConfig.detection.reEstimateBackground = False
+        catalogs = {}
+        for band, exposure in self.getExposures(dict(skymap=SKYMAP, tract=TRACT, patch=NOISE_PATCH)).items():
+            schema = afwTable.SourceTable.makeMinimalSchema()
+            detect = DetectCoaddSourcesTask(schema=schema, config=detConfig)
+            catalogs[band] = detect.run(exposure, idFactory=afwTable.IdFactory.makeSimple(), expId=0).outputSources
+
+        mergeConfig = MergeDetectionsTask.ConfigClass()
+        mergeConfig.priorityList = ["i", "r", "z", "y", "g", "u"]
+        merge = MergeDetectionsTask(config=mergeConfig, schema=catalogs["i"].schema)
+        tractInfo = skyMap[TRACT]
+        patchInfo = tractInfo.getPatchInfo(NOISE_PATCH)
+        self.assertEqual(patchInfo.getOuterBBox().getMin(), geom.Point2I(0, 0))
+        skyInfo = Struct(skyMap=skyMap, tractInfo=tractInfo, patchInfo=patchInfo,
+                         wcs=tractInfo.getWcs(), bbox=patchInfo.getOuterBBox())
+        merged = merge.run(catalogs=catalogs, skyInfo=skyInfo, idFactory=afwTable.IdFactory.makeSimple(),
+                           skySeed=0).outputCatalog
+        self.assertGreater(len(merged), 0)
 
 
 class ConfigEffectTestCase(lsst.utils.tests.TestCase):
